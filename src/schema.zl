@@ -1,0 +1,76 @@
+// A schema-lite for `zq validate`: required paths and expected types.
+//
+//   {"required": ["name", "server.port"],
+//    "types": {"name": "string", "server.port": "integer", "tags": "array"}}
+//
+// Types: string, number, integer, boolean, array, object, null.
+namespace zq
+
+// One expected type.
+struct TypeRule {
+    Path Path
+    Type string
+}
+
+// A loaded schema.
+struct Schema {
+    Required []Path
+    Types    []TypeRule
+
+    // Check returns one message per violation, each starting with its path.
+    func Check(doc *Node) []string {
+        var out []string = []
+        for p in this.Required {
+            try Lookup(doc, p) catch err {
+                out = append(out, p.Text + ": required")
+            }
+        }
+        for r in this.Types {
+            var v = try Lookup(doc, r.Path) catch err {
+                continue
+            }
+            if !hasType(v, r.Type) {
+                out = append(out, r.Path.Text + ": expected " + r.Type + ", got " + v.TypeName())
+            }
+        }
+        return out
+    }
+}
+
+const typeNames = ["string", "number", "integer", "boolean", "array", "object", "null"]
+
+func hasType(v *Node, t string) bool {
+    if t == "integer" {
+        return v.Kind == Kind.Number && !containsAny(v.Num, ".eE")
+    }
+    return v.TypeName() == t
+}
+
+// LoadSchema parses a schema file.
+func LoadSchema(text string) Schema! {
+    var doc = ParseJson(text)?
+    var s = Schema{}
+    var req = try Lookup(doc, Path{
+        Text: "required",
+        Steps: [Step{Key: "required"}],
+    }) else NewObject()
+    if req.Kind == Kind.Array {
+        for x in req.Items {
+            if x.Kind != Kind.String {
+                return BadInput("required: expected an array of paths")
+            }
+            s.Required = append(s.Required, ParsePath(x.S)?)
+        }
+    }
+    var types = try Lookup(doc, Path{Text: "types", Steps: [Step{Key: "types"}]}) else NewObject()
+    for i, k in types.Keys {
+        var t = types.Vals[i]
+        if t.Kind != Kind.String || !slices.Contains(typeNames, t.S) {
+            return BadInput(
+                "types." + k + ": unknown type (want one of " + strings.Join(typeNames, ", ") + ")",
+            )
+        }
+        s.Types = append(s.Types, TypeRule{Path: ParsePath(k)?, Type: t.S})
+    }
+    return s
+}

@@ -1,0 +1,129 @@
+// Reading documents: a whole JSON/YAML document, or NDJSON line by line
+// through a buffered reader.
+namespace zq
+
+// The process streams, injectable for tests.
+struct Env {
+    Stdin io.Reader
+    Out   io.Writer
+    Err   io.Writer
+}
+
+// Flags shared by every command.
+struct InputFlags {
+    @cli.flag(name: "input", short: "i", help: "read this file instead of stdin")       Input  string
+    @cli.flag(help: "input format: json, yaml (default: by file extension, else json)") From   string
+    @cli.flag(help: "newline-delimited JSON: run the command on every line")            Ndjson bool
+}
+
+// Source is the file named by -i, else the positional argument at pos.
+func source(flags InputFlags, args []string, pos int) string {
+    if flags.Input != "" {
+        return flags.Input
+    }
+    if len(args) > pos {
+        return args[pos]
+    }
+    return ""
+}
+
+func formatOf(flags InputFlags, path string) string! {
+    var f = strings.ToLower(flags.From)
+    if f == "" {
+        if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
+            return "yaml"
+        }
+        return "json"
+    }
+    if f != "json" && f != "yaml" {
+        return Usage("--from must be json or yaml, not " + strconv.Quote(flags.From))
+    }
+    return f
+}
+
+// Parse reads a document in the given format.
+func Parse(text string, format string) *Node! {
+    if format == "yaml" {
+        return ParseYaml(text)?
+    }
+    return ParseJson(text)?
+}
+
+// openInput returns the reader for path ("" = stdin) and a name for messages.
+func openInput(env Env, path string) io.Reader! {
+    if path == "" || path == "-" {
+        return env.Stdin
+    }
+    var f = os.Open(path)?
+    return f
+}
+
+func write(env Env, text string) void! {
+    _ = io.WriteString(env.Out, text)?
+}
+
+// Report writes a diagnostic to stderr, one "zq: cmd: ..." line per
+// line of msg.
+func Report(env Env, cmd string, msg string) {
+    try {
+        for line in strings.Split(msg, "\n") {
+            _ = io.WriteString(env.Err, "zq: " + cmd + ": " + line + "\n")?
+        }
+    } catch err {
+        io.Eprintln("zq: " + cmd + ": " + msg)
+    }
+}
+
+// RunOp reads the input and applies op (one document in, the text to
+// print out): once to the whole document, or
+// with --ndjson to every non-empty line (failures are reported with
+// their line number and the run goes on; the worst exit status wins).
+func RunOp(env Env, cmd string, flags InputFlags, path string, op func(*Node) string!) void! {
+    var format = formatOf(flags, path)?
+    var r = openInput(env, path)?("read " + displayName(path))
+    if !flags.Ndjson {
+        var text = io.ReadAllString(r)?("read " + displayName(path))
+        var doc = Parse(text, format)?("parse " + displayName(path))
+        write(env, op(doc)?)?
+        return
+    }
+    var br = io.NewBufferedReader(r)
+    var line = 0
+    var worst = 0
+    for {
+        var text = try br.ReadLine() catch err {
+            if errors.Is(err, io.EOF) {
+                break
+            }
+            return err
+        }
+        line += 1
+        if strings.Trim(text) == "" {
+            continue
+        }
+        try {
+            var doc = ParseJson(text)?
+            write(env, op(doc)?)?
+        } catch err {
+            var code = ExitCode(err)
+            Report(
+                env,
+                cmd,
+                "line " + strconv.Itoa(line) + ": " + strings.Replace(err.Message(), "\n", "; "),
+            )
+            if code > worst {
+                worst = code
+            }
+        }
+    }
+    if worst != 0 {
+        return Failure{Code: worst, Text: "", Reported: true}
+    }
+}
+
+func displayName(path string) string {
+    if path == "" || path == "-" {
+        return "stdin"
+    }
+    return path
+}

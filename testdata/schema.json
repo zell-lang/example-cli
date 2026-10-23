@@ -1,0 +1,1 @@
+{"required": ["name", "server.port", "owner"], "types": {"name": "string", "server.port": "integer", "tags": "array", "ratio": "string"}}

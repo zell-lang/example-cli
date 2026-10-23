@@ -1,0 +1,26 @@
+{
+    "debug": false,
+    "name": "shop",
+    "note": null,
+    "ratio": 0.75,
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8080
+    },
+    "tags": [
+        "api",
+        "v2"
+    ],
+    "users": [
+        {
+            "id": 1,
+            "name": "ann"
+        },
+        {
+            "admin": true,
+            "id": 2,
+            "name": "bob"
+        }
+    ],
+    "version": 3
+}

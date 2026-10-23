@@ -1,0 +1,90 @@
+// YAML output in block style. Strings that YAML would read as something
+// else (numbers, booleans, "a: b", leading "-") are written double-quoted,
+// which is JSON string syntax.
+namespace zq
+
+// FormatYaml writes n as a YAML document ending with a newline.
+func FormatYaml(n *Node, sortKeys bool) string {
+    var b = strings.Builder{}
+    if isEmptyOrScalar(n) {
+        b.Write(scalarYaml(n) + "\n")
+    } else {
+        writeYamlBlock(&b, n, sortKeys, "")
+    }
+    return b.String()
+}
+
+func isEmptyOrScalar(n *Node) bool {
+    return (n.Kind != Kind.Array && n.Kind != Kind.Object) || n.Len() == 0
+}
+
+func scalarYaml(n *Node) string {
+    switch n.Kind {
+        case Kind.String: return yamlString(n.S)
+        case Kind.Array: return "[]"
+        case Kind.Object: return "{}"
+        default:
+            return scalarJson(n)
+    }
+}
+
+// yamlString quotes s unless it reads back as the same plain string.
+func yamlString(s string) string {
+    if s == "" || strings.Trim(s) != s {
+        return encoding.json.Quote(s)
+    }
+    switch strings.ToLower(s) {
+        case "true", "false", "null", "yes", "no", "on", "off", "~":
+            return encoding.json.Quote(s)
+    }
+    var first = s[0..1]
+    if containsAny(first, "-?:,[]{}#&*!|>'\"%@`0123456789.+") {
+        return encoding.json.Quote(s)
+    }
+    if strings.Contains(s, ": ") || strings.Contains(s, " #") || containsAny(s, "\n\t\"\\") {
+        return encoding.json.Quote(s)
+    }
+    return s
+}
+
+func writeYamlBlock(b *strings.Builder, n *Node, sortKeys bool, pad string) {
+    if n.Kind == Kind.Array {
+        for x in n.Items {
+            if isEmptyOrScalar(x) {
+                b.Write(pad + "- " + scalarYaml(x) + "\n")
+            } else if x.Kind == Kind.Object {
+                // The first member shares the "- " line.
+                var sub = strings.Builder{}
+                writeYamlBlock(&sub, x, sortKeys, pad + "  ")
+                b.Write(pad + "- " + sub.String()[len(pad) + 2..])
+            } else {
+                b.Write(pad + "-\n")
+                writeYamlBlock(b, x, sortKeys, pad + "  ")
+            }
+        }
+        return
+    }
+    for i in memberOrder(n, sortKeys) {
+        var key = yamlString(n.Keys[i])
+        var v = n.Vals[i]
+        if isEmptyOrScalar(v) {
+            b.Write(pad + key + ": " + scalarYaml(v) + "\n")
+        } else {
+            b.Write(pad + key + ":\n")
+            writeYamlBlock(b, v, sortKeys, pad + "  ")
+        }
+    }
+}
+
+// containsAny reports whether s contains any character of chars
+// (strings has no ContainsAny/IndexAny yet).
+func containsAny(s string, chars string) bool {
+    for c in s {
+        for d in chars {
+            if c == d {
+                return true
+            }
+        }
+    }
+    return false
+}

@@ -1,0 +1,107 @@
+// The command-line application: subcommands on std `cli`, and the mapping
+// from errors to exit statuses.
+namespace zq
+
+// The exit status of the last command (cli.App only knows 0/1/2).
+struct runState {
+    Code int
+}
+
+// handler adapts a command to cli: its error is reported as
+// "zq: <cmd>: <message>" and turned into an exit status.
+func handler(
+    name string,
+    env Env,
+    st *runState,
+    run func(*cli.Context, Env) void!,
+) func(*cli.Context) void! {
+    return func(c *cli.Context) void! {
+        try run(c, env) catch err {
+            var f = failureOf(err)
+            st.Code = f.Code
+            if !f.Reported {
+                Report(env, name, err.Message())
+            }
+        }
+    }
+}
+
+// NewApp builds the zq command tree writing to env.
+func NewApp(env Env, st *runState) cli.App {
+    var commands = [
+        cli.Command{
+            Name: "get",
+            Help: "print the value at a path",
+            Args: "<path> [file]",
+            Flags: cli.FlagsOf<GetFlags>(),
+            Run: handler("get", env, st, cmdGet),
+        },
+        cli.Command{
+            Name: "set",
+            Help: "set the value at a path and print the document",
+            Args: "<path> <value> [file]",
+            Flags: cli.FlagsOf<OutFlags>(),
+            Run: handler("set", env, st, cmdSet),
+        },
+        cli.Command{
+            Name: "keys",
+            Help: "list the keys of an object (indexes of an array)",
+            Args: "[path] [file]",
+            Run: handler("keys", env, st, cmdKeys),
+        },
+        cli.Command{
+            Name: "count",
+            Help: "count the members of an object or array",
+            Args: "[path] [file]",
+            Run: handler("count", env, st, cmdCount),
+        },
+        cli.Command{
+            Name: "convert",
+            Help: "convert to json, yaml or toml",
+            Args: "[file]",
+            Flags: cli.FlagsOf<ConvertFlags>(),
+            Run: handler("convert", env, st, cmdConvert),
+        },
+        cli.Command{
+            Name: "validate",
+            Help: "check required keys and types against a schema",
+            Args: "[file]",
+            Flags: cli.FlagsOf<ValidateFlags>(),
+            Run: handler("validate", env, st, cmdValidate),
+        },
+        cli.Command{
+            Name: "fmt",
+            Help: "pretty-print JSON",
+            Args: "[file]",
+            Flags: cli.FlagsOf<OutFlags>(),
+            Run: handler("fmt", env, st, cmdFmt),
+        },
+    ]
+    return cli.App{
+        Name: "zq",
+        Version: "0.1.0",
+        Help: "query, edit and convert JSON and YAML documents",
+        Flags: cli.FlagsOf<InputFlags>(),
+        Commands: commands,
+        Errors: env.Err,
+    }
+}
+
+// Execute runs zq with args (without the program name) and returns the
+// exit status: 0 ok, 1 usage, 2 input error, 3 not found.
+func Execute(args []string, env Env) int {
+    var st = new runState{}
+    var app = NewApp(env, st)
+    var all = ["zq"]
+    for a in args {
+        all = append(all, a)
+    }
+    var code = app.Run(all)
+    if code == 2 {
+        return ExitUsage
+    }
+    if code != 0 {
+        return ExitInput
+    }
+    return st.Code
+}

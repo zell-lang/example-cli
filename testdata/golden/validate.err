@@ -1,0 +1,2 @@
+zq: validate: owner: required
+zq: validate: ratio: expected string, got number

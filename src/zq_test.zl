@@ -1,0 +1,163 @@
+// End-to-end tests: every subcommand against golden files in
+// testdata/golden, and one test per exit status.
+namespace zq
+
+// What one run of zq produced.
+struct Run {
+    Out  string
+    Err  string
+    Code int
+}
+
+// zq runs the command line args with stdin as standard input.
+func zq(args []string, stdin string) Run {
+    var out = io.NewBytesWriter()
+    var errw = io.NewBytesWriter()
+    var code = Execute(args, Env{Stdin: io.NewStringReader(stdin), Out: out, Err: errw})
+    return Run{Out: out.String(), Err: errw.String(), Code: code}
+}
+
+// golden checks a run's stdout against testdata/golden/<name>.
+func golden(t *testing.T, name string, args []string) {
+    var r = zq(args, "")
+    testing.Equal(t, r.Err, "")
+    testing.Equal(t, r.Code, 0)
+    var want = try io.ReadFile("testdata/golden/" + name) catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, r.Out, want)
+}
+
+@test func TestGet(t *testing.T) {
+    golden(t, "get.out", ["get", "users[1]", "testdata/app.json"])
+    golden(t, "get_raw.out", ["get", "-r", "server.host", "-i", "testdata/app.json"])
+}
+
+@test func TestGetFromStdin(t *testing.T) {
+    var r = zq(["get", "a.b[1].c"], "{\"a\": {\"b\": [10, {\"c\": \"x\"}]}}")
+    testing.Equal(t, r.Out, "\"x\"\n")
+    testing.Equal(t, zq(["get", "[\"a.b\"]"], "{\"a.b\": true}").Out, "true\n")
+}
+
+@test func TestSet(t *testing.T) {
+    golden(t, "set.out", ["set", "server.port", "9090", "testdata/app.json"])
+    golden(t, "set_append.out", [
+        "set",
+        "users[2].name",
+        "cid",
+        "--indent",
+        "0",
+        "testdata/app.json",
+    ])
+    testing.Equal(
+        t,
+        zq(["set", "a.b", "[1,\"x\"]", "--indent=0"], "{}").Out,
+        "{\"a\":{\"b\":[1,\"x\"]}}\n",
+    )
+}
+
+@test func TestKeysAndCount(t *testing.T) {
+    golden(t, "keys.out", ["keys", "testdata/app.json"])
+    golden(t, "keys_array.out", ["keys", "users", "testdata/app.json"])
+    golden(t, "count.out", ["count", "tags", "testdata/app.json"])
+    testing.Equal(t, zq(["count"], "{\"a\": 1, \"b\": 2}").Out, "2\n")
+}
+
+@test func TestConvert(t *testing.T) {
+    golden(t, "convert.yaml", ["convert", "--to", "yaml", "testdata/app.json"])
+    golden(t, "convert_yaml.json", ["convert", "--to", "json", "--sort-keys", "testdata/app.yaml"])
+    var r = zq(
+        ["convert", "--to", "toml"],
+        "{\"name\": \"shop\", \"server\": {\"port\": 8080}, \"users\": [{\"id\": 1}]}",
+    )
+    testing.Equal(t, r.Out, "name = \"shop\"\n\n[server]\nport = 8080\n\n[[users]]\nid = 1\n")
+}
+
+@test func TestConvertTomlGolden(t *testing.T) {
+    var doc = try io.ReadFile("testdata/app.json") catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    var set = zq(["set", "note", "\"none\""], doc)
+    var r = zq(["convert", "--to", "toml"], set.Out)
+    testing.Equal(t, r.Out, try io.ReadFile("testdata/golden/convert.toml") else "?")
+}
+
+@test func TestFmt(t *testing.T) {
+    golden(t, "fmt.out", ["fmt", "--indent", "4", "--sort-keys", "testdata/app.json"])
+    golden(t, "fmt_compact.out", ["fmt", "--indent", "0", "testdata/app.json"])
+}
+
+@test func TestValidate(t *testing.T) {
+    var r = zq(["validate", "-s", "testdata/schema.json", "testdata/app.json"], "")
+    testing.Equal(t, r.Code, ExitInput)
+    testing.Equal(t, r.Err, try io.ReadFile("testdata/golden/validate.err") else "?")
+    var ok = zq(
+        ["validate", "-s", "testdata/schema.json"],
+        "{\"name\": \"x\", \"owner\": \"me\", \"server\": {\"port\": 1}, \"ratio\": \"1/2\"}",
+    )
+    testing.Equal(t, ok.Out, "ok\n")
+    testing.Equal(t, ok.Code, ExitOK)
+}
+
+@test func TestNdjson(t *testing.T) {
+    var r = zq(["get", "user.name", "--ndjson", "testdata/events.ndjson"], "")
+    testing.Equal(t, r.Out, try io.ReadFile("testdata/golden/ndjson_get.out") else "?")
+    testing.Equal(t, r.Err, try io.ReadFile("testdata/golden/ndjson_get.err") else "?")
+    testing.Equal(t, r.Code, ExitNotFound)
+    var c = zq(["count", "--ndjson"], "[1,2]\n{\"a\":1}\n")
+    testing.Equal(t, c.Out, "2\n1\n")
+}
+
+@test func TestExitOK(t *testing.T) {
+    testing.Equal(t, zq(["get", "."], "1").Code, ExitOK)
+}
+
+@test func TestExitUsage(t *testing.T) {
+    testing.Equal(t, zq(["get"], "{}").Code, ExitUsage)
+    testing.Equal(t, zq(["frob"], "{}").Code, ExitUsage)
+    testing.Equal(t, zq(["fmt", "--indent", "x"], "{}").Code, ExitUsage)
+    var r = zq(["get", "a[x"], "{}")
+    testing.Equal(t, r.Code, ExitUsage)
+    testing.Equal(t, r.Err, "zq: get: path \"a[x\": missing ]\n")
+}
+
+@test func TestExitInput(t *testing.T) {
+    var r = zq(["count"], "{bad")
+    testing.Equal(t, r.Code, ExitInput)
+    testing.Contains(t, r.Err, "zq: count: parse stdin: json:")
+    testing.Equal(t, zq(["count", "-i", "testdata/missing.json"], "").Code, ExitInput)
+    testing.Equal(t, zq(["keys", "name"], "{\"name\": \"x\"}").Code, ExitInput)
+}
+
+@test func TestExitNotFound(t *testing.T) {
+    var r = zq(["get", "server.nope", "testdata/app.json"], "")
+    testing.Equal(t, r.Code, ExitNotFound)
+    testing.Equal(t, r.Err, "zq: get: server.nope: no such key\n")
+    testing.Equal(
+        t,
+        zq(["get", "tags[5]"], "{\"tags\": []}").Err,
+        "zq: get: tags[5]: index out of range (length 0)\n",
+    )
+}
+
+@test func TestHelpText(t *testing.T) {
+    var app = NewApp(
+        Env{Stdin: io.NewStringReader(""), Out: io.NewBytesWriter(), Err: io.NewBytesWriter()},
+        new runState{},
+    )
+    testing.Contains(t, app.HelpText(["get"]), "zq get [flags] <path> [file]")
+    testing.Contains(t, app.HelpText([]), "convert")
+}
+
+@test func TestPaths(t *testing.T) {
+    var p = try ParsePath("a.b[2][\"x.y\"].c") catch err {
+        t.Fatal(err.Message())
+        return
+    }
+    testing.Equal(t, len(p.Steps), 5)
+    testing.Equal(t, p.Prefix(4), "a.b[2][\"x.y\"]")
+    testing.Equal(t, yamlString("8080"), "\"8080\"")
+    testing.Equal(t, yamlString("hello world"), "hello world")
+}

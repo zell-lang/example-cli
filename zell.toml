@@ -1,0 +1,5 @@
+[package]
+name = "zq"
+version = "0.1.0"
+namespace = "zq"
+entry = "src/main.zl"

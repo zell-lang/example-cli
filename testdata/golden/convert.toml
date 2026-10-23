@@ -1,0 +1,19 @@
+name = "shop"
+version = 3
+debug = false
+tags = ["api", "v2"]
+ratio = 0.75
+note = "none"
+
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[[users]]
+id = 1
+name = "ann"
+
+[[users]]
+id = 2
+name = "bob"
+admin = true

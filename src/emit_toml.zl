@@ -1,0 +1,82 @@
+// TOML output: scalars and arrays of scalars as `key = value`, objects as
+// [tables], arrays of objects as [[arrays of tables]]. TOML has no null,
+// so a null member is an error.
+namespace zq
+
+// FormatToml writes an object as a TOML document.
+func FormatToml(n *Node, sortKeys bool) string! {
+    if n.Kind != Kind.Object {
+        return BadInput("toml: the document must be an object, not " + n.TypeName())
+    }
+    var b = strings.Builder{}
+    writeTable(&b, n, sortKeys, "")?
+    var out = b.String()
+    if strings.HasPrefix(out, "\n") {
+        out = out[1..]
+    }
+    return out
+}
+
+func tomlKey(k string) string {
+    if isPlainKey(k) {
+        return k
+    }
+    return encoding.json.Quote(k)
+}
+
+func isTableArray(n *Node) bool {
+    if n.Kind != Kind.Array || len(n.Items) == 0 {
+        return false
+    }
+    for x in n.Items {
+        if x.Kind != Kind.Object {
+            return false
+        }
+    }
+    return true
+}
+
+func inlineToml(n *Node, path string) string! {
+    switch n.Kind {
+        case Kind.Null: return BadInput("toml: " + path + ": null has no TOML form")
+        case Kind.String: return encoding.json.Quote(n.S)
+        case Kind.Array:
+            var parts []string = []
+            for i, x in n.Items {
+                parts = append(parts, inlineToml(x, path + "[" + strconv.Itoa(i) + "]")?)
+            }
+            return "[" + strings.Join(parts, ", ") + "]"
+        case Kind.Object:
+            var parts []string = []
+            for i, k in n.Keys {
+                parts = append(parts, tomlKey(k) + " = " + inlineToml(n.Vals[i], path + "." + k)?)
+            }
+            return "{ " + strings.Join(parts, ", ") + " }"
+        default:
+            return scalarJson(n)
+    }
+}
+
+// writeTable writes the scalar members of n, then its sub-tables.
+func writeTable(b *strings.Builder, n *Node, sortKeys bool, prefix string) void! {
+    var order = memberOrder(n, sortKeys)
+    for i in order {
+        var v = n.Vals[i]
+        if v.Kind != Kind.Object && !isTableArray(v) {
+            b.Write(tomlKey(n.Keys[i]) + " = " + inlineToml(v, prefix + n.Keys[i])? + "\n")
+        }
+    }
+    for i in order {
+        var v = n.Vals[i]
+        var name = prefix + tomlKey(n.Keys[i])
+        if v.Kind == Kind.Object {
+            b.Write("\n[" + name + "]\n")
+            writeTable(b, v, sortKeys, name + ".")?
+        } else if isTableArray(v) {
+            for x in v.Items {
+                b.Write("\n[[" + name + "]]\n")
+                writeTable(b, x, sortKeys, name + ".")?
+            }
+        }
+    }
+}

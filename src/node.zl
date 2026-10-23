@@ -1,0 +1,156 @@
+// The document model: a mutable tree that every format is read into and
+// written from. encoding.json.Value is a read-only view of a parsed
+// document, so `set`, `--sort-keys` and the format conversions work on
+// this tree instead.
+namespace zq
+
+// The kind of a Node.
+enum Kind { Null, Bool, Number, String, Array, Object }
+
+// One value of a document. Objects keep their keys in document order.
+// A document is a tree (nodes are never shared), so no cycles form.
+@allowCycle
+struct Node {
+    Kind Kind
+    // Bool value.
+    B bool
+    // Number as its JSON text ("42", "1.5e3"), so integers stay exact.
+    Num string
+    // String value.
+    S string
+    // Array elements.
+    Items []*Node
+    // Object member names, parallel to Vals.
+    Keys []string
+    Vals []*Node
+
+    // Len is the number of elements or members (0 for scalars).
+    func Len() int {
+        switch this.Kind {
+            case Kind.Array: return len(this.Items)
+            case Kind.Object: return len(this.Keys)
+            default:
+                return 0
+        }
+    }
+
+    // Index of member key, or -1.
+    func Find(key string) int {
+        for i, k in this.Keys {
+            if k == key {
+                return i
+            }
+        }
+        return -1
+    }
+
+    // Put sets member key, appending it when it is new.
+    func Put(key string, v *Node) {
+        var i = this.Find(key)
+        if i >= 0 {
+            this.Vals[i] = v
+            return
+        }
+        this.Keys = append(this.Keys, key)
+        this.Vals = append(this.Vals, v)
+    }
+
+    // TypeName is the JSON name of the kind: "object", "array", ...
+    func TypeName() string {
+        switch this.Kind {
+            case Kind.Null: return "null"
+            case Kind.Bool: return "boolean"
+            case Kind.Number: return "number"
+            case Kind.String: return "string"
+            case Kind.Array: return "array"
+            default:
+                return "object"
+        }
+    }
+}
+
+// NewObject returns an empty object.
+func NewObject() *Node {
+    return new Node{Kind: Kind.Object}
+}
+
+// NewString returns a string node.
+func NewString(s string) *Node {
+    return new Node{Kind: Kind.String, S: s}
+}
+
+// FromJson converts a parsed JSON value into a tree.
+func FromJson(v encoding.json.Value) *Node {
+    if v.IsObject() {
+        var n = NewObject()
+        var vals = v.Items()
+        for i, k in v.Keys() {
+            n.Put(k, FromJson(vals[i]))
+        }
+        return n
+    }
+    if v.IsArray() {
+        var n = new Node{Kind: Kind.Array}
+        for x in v.Items() {
+            n.Items = append(n.Items, FromJson(x))
+        }
+        return n
+    }
+    if v.IsString() {
+        return NewString(try v.String() else "")
+    }
+    if v.IsNumber() {
+        return new Node{Kind: Kind.Number, Num: v.Format()}
+    }
+    if v.IsBool() {
+        return new Node{Kind: Kind.Bool, B: try v.Bool() else false}
+    }
+    return new Node{Kind: Kind.Null}
+}
+
+// FromYaml converts a parsed YAML value into a tree.
+func FromYaml(v encoding.yaml.Value) *Node {
+    if v.IsMap() {
+        var n = NewObject()
+        var vals = v.Items()
+        for i, k in v.Keys() {
+            n.Put(k, FromYaml(vals[i]))
+        }
+        return n
+    }
+    if v.IsSeq() {
+        var n = new Node{Kind: Kind.Array}
+        for x in v.Items() {
+            n.Items = append(n.Items, FromYaml(x))
+        }
+        return n
+    }
+    if v.IsInt() || v.IsFloat() {
+        return new Node{Kind: Kind.Number, Num: v.Text()}
+    }
+    if v.IsBool() {
+        return new Node{Kind: Kind.Bool, B: try v.Bool() else false}
+    }
+    if v.IsNull() {
+        return new Node{Kind: Kind.Null}
+    }
+    return NewString(v.Text())
+}
+
+// ParseJson parses a JSON text into a tree.
+func ParseJson(text string) *Node! {
+    var v = encoding.json.ParseValue(text)?
+    return FromJson(v)
+}
+
+// ParseYaml parses a YAML text into a tree.
+func ParseYaml(text string) *Node! {
+    var v = encoding.yaml.ParseValue(text)?
+    return FromYaml(v)
+}
+
+// ParseLiteral reads a command-line value: JSON when it parses
+// (`42`, `true`, `{"a":1}`, `"x"`), otherwise the text as a string.
+func ParseLiteral(text string) *Node {
+    return try ParseJson(text) else NewString(text)
+}

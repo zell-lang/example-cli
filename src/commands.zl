@@ -1,0 +1,176 @@
+// The subcommands. Each one turns its arguments into an operation on one
+// document and hands it to RunOp, so every command works on a file, on
+// stdin and on NDJSON streams alike.
+namespace zq
+
+struct GetFlags {
+    @cli.flag(short: "r", help: "print strings without quotes") Raw bool
+}
+
+struct OutFlags {
+    @cli.flag(help: "spaces per level, 0 for one line") Indent   int = 2
+    @cli.flag(help: "sort object keys")                 SortKeys bool
+}
+
+struct ConvertFlags {
+    @cli.flag(help: "output format: json, yaml or toml") To       string = "json"
+    @cli.flag(help: "sort object keys")                  SortKeys bool
+}
+
+struct ValidateFlags {
+    @cli.flag(short: "s", help: "schema file: {\"required\": [paths], \"types\": {path: type}}", required: true) Schema string
+}
+
+// The JSON style of a command's output: indented, or one line per
+// document with --ndjson.
+func outStyle(flags InputFlags, indent int, sortKeys bool) JsonStyle {
+    if flags.Ndjson {
+        return JsonStyle{Indent: 0, SortKeys: sortKeys}
+    }
+    return JsonStyle{Indent: indent, SortKeys: sortKeys}
+}
+
+func needArgs(c *cli.Context, n int, what string) void! {
+    if len(c.Args) < n {
+        return Usage("missing " + what)
+    }
+}
+
+// zq get <path> [file]
+func cmdGet(c *cli.Context, env Env) void! {
+    needArgs(c, 1, "<path>")?
+    var inp = cli.Bind<InputFlags>(c)?
+    var f = cli.Bind<GetFlags>(c)?
+    var path = ParsePath(c.Args[0])?
+    var style = outStyle(inp, 2, false)
+    RunOp(env, "get", inp, source(inp, c.Args, 1), func(doc *Node) string! {
+        var v = Lookup(doc, path)?
+        if f.Raw && v.Kind == Kind.String {
+            return v.S + "\n"
+        }
+        return FormatJson(v, style) + "\n"
+    })?
+}
+
+// zq set <path> <value> [file]
+func cmdSet(c *cli.Context, env Env) void! {
+    needArgs(c, 2, "<path> <value>")?
+    var inp = cli.Bind<InputFlags>(c)?
+    var f = cli.Bind<OutFlags>(c)?
+    var path = ParsePath(c.Args[0])?
+    var raw = c.Args[1]
+    var style = outStyle(inp, f.Indent, f.SortKeys)
+    RunOp(env, "set", inp, source(inp, c.Args, 2), func(doc *Node) string! {
+        var out = Assign(doc, path, ParseLiteral(raw))?
+        return FormatJson(out, style) + "\n"
+    })?
+}
+
+// The arguments of keys/count: [path] [file]. A single argument naming
+// an existing file (and no -i) is the file.
+func optionalPath(c *cli.Context, inp InputFlags) (Path, string)! {
+    if len(c.Args) == 0 || (len(c.Args) == 1 && inp.Input == "" && fs.Exists(c.Args[0])) {
+        return (Path{Text: "."}, source(inp, c.Args, 0))
+    }
+    return (ParsePath(c.Args[0])?, source(inp, c.Args, 1))
+}
+
+func container(doc *Node, path Path) *Node! {
+    var v = Lookup(doc, path)?
+    if v.Kind != Kind.Array && v.Kind != Kind.Object {
+        return BadInput(path.Prefix(len(path.Steps)) + ": " + v.TypeName() + " has no members")
+    }
+    return v
+}
+
+// zq keys [path] [file]
+func cmdKeys(c *cli.Context, env Env) void! {
+    var inp = cli.Bind<InputFlags>(c)?
+    var (path, file) = optionalPath(c, inp)?
+    RunOp(env, "keys", inp, file, func(doc *Node) string! {
+        var v = container(doc, path)?
+        var names []string = []
+        if v.Kind == Kind.Array {
+            for i in 0..len(v.Items) {
+                names = append(names, strconv.Itoa(i))
+            }
+        } else {
+            names = v.Keys
+        }
+        if inp.Ndjson {
+            var arr = new Node{Kind: Kind.Array}
+            for k in names {
+                arr.Items = append(arr.Items, NewString(k))
+            }
+            return FormatJson(arr, JsonStyle{}) + "\n"
+        }
+        var out = ""
+        for k in names {
+            out += k + "\n"
+        }
+        return out
+    })?
+}
+
+// zq count [path] [file]
+func cmdCount(c *cli.Context, env Env) void! {
+    var inp = cli.Bind<InputFlags>(c)?
+    var (path, file) = optionalPath(c, inp)?
+    RunOp(env, "count", inp, file, func(doc *Node) string! {
+        return strconv.Itoa(container(doc, path)?.Len()) + "\n"
+    })?
+}
+
+// zq convert --to yaml|json|toml [file]
+func cmdConvert(c *cli.Context, env Env) void! {
+    var inp = cli.Bind<InputFlags>(c)?
+    var f = cli.Bind<ConvertFlags>(c)?
+    var to = strings.ToLower(f.To)
+    if to != "json" && to != "yaml" && to != "toml" {
+        return Usage("--to must be json, yaml or toml, not " + strconv.Quote(f.To))
+    }
+    if to == "toml" && inp.Ndjson {
+        return Usage("--to toml cannot write a stream of documents")
+    }
+    var style = outStyle(inp, 2, f.SortKeys)
+    RunOp(env, "convert", inp, source(inp, c.Args, 0), func(doc *Node) string! {
+        switch to {
+            case "yaml":
+                if inp.Ndjson {
+                    return "---\n" + FormatYaml(doc, f.SortKeys)
+                }
+                return FormatYaml(doc, f.SortKeys)
+            case "toml": return FormatToml(doc, f.SortKeys)?
+            default:
+                return FormatJson(doc, style) + "\n"
+        }
+    })?
+}
+
+// zq fmt [--indent N] [--sort-keys] [file]
+func cmdFmt(c *cli.Context, env Env) void! {
+    var inp = cli.Bind<InputFlags>(c)?
+    var f = cli.Bind<OutFlags>(c)?
+    if f.Indent < 0 || f.Indent > 16 {
+        return Usage("--indent must be between 0 and 16")
+    }
+    var style = outStyle(inp, f.Indent, f.SortKeys)
+    RunOp(env, "fmt", inp, source(inp, c.Args, 0), func(doc *Node) string! {
+        return FormatJson(doc, style) + "\n"
+    })?
+}
+
+// zq validate --schema spec.json [file]
+func cmdValidate(c *cli.Context, env Env) void! {
+    var inp = cli.Bind<InputFlags>(c)?
+    var f = cli.Bind<ValidateFlags>(c)?
+    var text = io.ReadFile(f.Schema)?("read schema")
+    var schema = LoadSchema(text)?("schema " + f.Schema)
+    RunOp(env, "validate", inp, source(inp, c.Args, 0), func(doc *Node) string! {
+        var problems = schema.Check(doc)
+        if len(problems) == 0 {
+            return "ok\n"
+        }
+        return BadInput(strings.Join(problems, "\n"))
+    })?
+}

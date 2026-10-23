@@ -1,0 +1,85 @@
+// JSON output: compact (NDJSON lines) or indented like jq.
+namespace zq
+
+// How to write JSON.
+struct JsonStyle {
+    // Spaces per level; 0 writes compact one-line JSON.
+    Indent int
+    // Object members sorted by key instead of document order.
+    SortKeys bool
+}
+
+// memberOrder returns the member indexes of an object in output order.
+func memberOrder(n *Node, sorted bool) []int {
+    var idx []int = []
+    for i in 0..len(n.Keys) {
+        idx = append(idx, i)
+    }
+    if sorted {
+        slices.SortBy(idx, (i int) => n.Keys[i])
+    }
+    return idx
+}
+
+// scalarJson is the JSON text of a scalar node.
+func scalarJson(n *Node) string {
+    switch n.Kind {
+        case Kind.Null: return "null"
+        case Kind.Bool: return strconv.FormatBool(n.B)
+        case Kind.Number: return n.Num
+        default:
+            return encoding.json.Quote(n.S)
+    }
+}
+
+// FormatJson writes n as JSON (no trailing newline).
+func FormatJson(n *Node, style JsonStyle) string {
+    var b = strings.Builder{}
+    writeJson(&b, n, style, 0)
+    return b.String()
+}
+
+func writeJson(b *strings.Builder, n *Node, style JsonStyle, depth int) {
+    var nl = ""
+    var pad = ""
+    var inner = ""
+    var colon = ":"
+    if style.Indent > 0 {
+        nl = "\n"
+        pad = strings.Repeat(" ", style.Indent * depth)
+        inner = strings.Repeat(" ", style.Indent * (depth + 1))
+        colon = ": "
+    }
+    switch n.Kind {
+        case Kind.Array:
+            if len(n.Items) == 0 {
+                b.Write("[]")
+                return
+            }
+            b.Write("[" + nl)
+            for i, x in n.Items {
+                if i > 0 {
+                    b.Write("," + nl)
+                }
+                b.Write(inner)
+                writeJson(b, x, style, depth + 1)
+            }
+            b.Write(nl + pad + "]")
+        case Kind.Object:
+            if len(n.Keys) == 0 {
+                b.Write("{}")
+                return
+            }
+            b.Write("{" + nl)
+            for j, i in memberOrder(n, style.SortKeys) {
+                if j > 0 {
+                    b.Write("," + nl)
+                }
+                b.Write(inner + encoding.json.Quote(n.Keys[i]) + colon)
+                writeJson(b, n.Vals[i], style, depth + 1)
+            }
+            b.Write(nl + pad + "}")
+        default:
+            b.Write(scalarJson(n))
+    }
+}

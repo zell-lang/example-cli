@@ -1,0 +1,7 @@
+// zq: a small jq-like tool for JSON and YAML.
+namespace zq
+
+func main() {
+    var env = Env{Stdin: os.Stdin(), Out: os.Stdout(), Err: os.Stderr()}
+    os.Exit(Execute(os.Args()[1..], env))
+}

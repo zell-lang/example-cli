@@ -1,0 +1,52 @@
+// The errors zq reports. A Failure carries the exit status; context added
+// on the way up with `?("...")` keeps it reachable through errors.As.
+namespace zq
+
+// Exit statuses.
+const ExitOK = 0
+const ExitUsage = 1
+const ExitInput = 2
+const ExitNotFound = 3
+
+// A failure with its exit status.
+struct Failure {
+    Code int
+    Text string
+    // Already written to stderr (NDJSON line errors): only the status is left.
+    Reported bool
+
+    func Message() string {
+        return this.Text
+    }
+}
+
+// Usage is a command-line mistake (exit status 1).
+func Usage(msg string) error {
+    return Failure{Code: ExitUsage, Text: msg}
+}
+
+// BadInput is unreadable or malformed input, a value of the wrong type or
+// a failed validation (exit status 2).
+func BadInput(msg string) error {
+    return Failure{Code: ExitInput, Text: msg}
+}
+
+// NotFound is a path missing from the document (exit status 3).
+func NotFound(msg string) error {
+    return Failure{Code: ExitNotFound, Text: msg}
+}
+
+// ExitCode maps an error to the process exit status: the Failure inside
+// it, or 2 for any other error (I/O, parse errors from encoding.*).
+func ExitCode(err error) int {
+    return failureOf(err).Code
+}
+
+// failureOf finds the Failure inside err, or makes an input failure of it.
+func failureOf(err error) Failure {
+    var f Failure
+    if errors.As(err, &f) {
+        return f
+    }
+    return Failure{Code: ExitInput, Text: err.Message()}
+}

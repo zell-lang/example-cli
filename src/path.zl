@@ -1,0 +1,199 @@
+// Key paths: `a.b[0].c`, `servers[1]`, `["key with.dot"]`, `.` for the
+// whole document.
+namespace zq
+
+// One step of a path: an object key or an array index.
+struct Step {
+    Key     string
+    Index   int
+    IsIndex bool
+}
+
+// A parsed key path.
+struct Path {
+    Text  string
+    Steps []Step
+
+    // Prefix is the text of the first n steps, for diagnostics.
+    func Prefix(n int) string {
+        var out = ""
+        for i in 0..n {
+            var s = this.Steps[i]
+            if s.IsIndex {
+                out += "[" + strconv.Itoa(s.Index) + "]"
+            } else if isPlainKey(s.Key) {
+                if out != "" {
+                    out += "."
+                }
+                out += s.Key
+            } else {
+                out += "[" + strconv.Quote(s.Key) + "]"
+            }
+        }
+        if out == "" {
+            return "."
+        }
+        return out
+    }
+}
+
+func isPlainKey(k string) bool {
+    if k == "" {
+        return false
+    }
+    for c in k {
+        if !(unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '-') {
+            return false
+        }
+    }
+    return true
+}
+
+// ParsePath parses a key path; an usage error for bad syntax.
+func ParsePath(text string) Path! {
+    var p = Path{Text: text}
+    if text == "" || text == "." {
+        return p
+    }
+    var rest = text
+    if strings.HasPrefix(rest, ".") {
+        rest = rest[1..]
+    }
+    for rest != "" {
+        if strings.HasPrefix(rest, "[") {
+            var end = strings.Index(rest, "]")
+            if end < 0 {
+                return Usage("path " + strconv.Quote(text) + ": missing ]")
+            }
+            var inner = rest[1..end]
+            if strings.HasPrefix(inner, "\"") {
+                var key = try strconv.Unquote(inner) catch err {
+                    return Usage("path " + strconv.Quote(text) + ": bad quoted key " + inner)
+                }
+                p.Steps = append(p.Steps, Step{Key: key})
+            } else {
+                var i = try strings.ToInt(inner) catch err {
+                    return Usage("path " + strconv.Quote(text) + ": bad index [" + inner + "]")
+                }
+                p.Steps = append(p.Steps, Step{Index: i, IsIndex: true})
+            }
+            rest = rest[end + 1..]
+            if strings.HasPrefix(rest, ".") {
+                rest = rest[1..]
+            }
+            continue
+        }
+        var end = len(rest)
+        var dot = strings.Index(rest, ".")
+        if dot >= 0 {
+            end = dot
+        }
+        var br = strings.Index(rest, "[")
+        if br >= 0 && br < end {
+            end = br
+        }
+        if end == 0 {
+            return Usage("path " + strconv.Quote(text) + ": empty key")
+        }
+        p.Steps = append(p.Steps, Step{Key: rest[..end]})
+        rest = rest[end..]
+        if strings.HasPrefix(rest, ".") {
+            rest = rest[1..]
+        }
+    }
+    return p
+}
+
+// Lookup returns the node at path; the NotFound error names the first missing step.
+func Lookup(root *Node, p Path) *Node! {
+    var cur = root
+    for i, s in p.Steps {
+        cur = child(cur, s, p, i)?
+    }
+    return cur
+}
+
+func child(cur *Node, s Step, p Path, i int) *Node! {
+    var at = p.Prefix(i + 1)
+    if s.IsIndex {
+        if cur.Kind != Kind.Array {
+            return NotFound(at + ": " + p.Prefix(i) + " is " + cur.TypeName() + ", not an array")
+        }
+        if s.Index < 0 || s.Index >= len(cur.Items) {
+            return NotFound(
+                at + ": index out of range (length " + strconv.Itoa(len(cur.Items)) + ")",
+            )
+        }
+        return cur.Items[s.Index]
+    }
+    if cur.Kind != Kind.Object {
+        return NotFound(at + ": " + p.Prefix(i) + " is " + cur.TypeName() + ", not an object")
+    }
+    var k = cur.Find(s.Key)
+    if k < 0 {
+        return NotFound(at + ": no such key")
+    }
+    return cur.Vals[k]
+}
+
+// Assign stores v at path, creating missing object keys on the way; an
+// index may address an element or append (index == length).
+func Assign(root *Node, p Path, v *Node) *Node! {
+    if len(p.Steps) == 0 {
+        return v
+    }
+    var cur = root
+    for i, s in p.Steps {
+        var last = i == len(p.Steps) - 1
+        if s.IsIndex {
+            if cur.Kind != Kind.Array {
+                return BadInput(
+                    p.Prefix(i + 1) +
+                        ": " +
+                        p.Prefix(i) +
+                        " is " +
+                        cur.TypeName() +
+                        ", not an array",
+                )
+            }
+            if s.Index < 0 || s.Index > len(cur.Items) {
+                return NotFound(
+                    p.Prefix(i + 1) +
+                        ": index out of range (length " +
+                        strconv.Itoa(len(cur.Items)) +
+                        ")",
+                )
+            }
+            if s.Index == len(cur.Items) {
+                cur.Items = append(cur.Items, NewObject())
+            }
+            if last {
+                cur.Items[s.Index] = v
+            } else {
+                cur = cur.Items[s.Index]
+            }
+            continue
+        }
+        if cur.Kind != Kind.Object {
+            return BadInput(
+                p.Prefix(i + 1) + ": " + p.Prefix(i) + " is " + cur.TypeName() + ", not an object",
+            )
+        }
+        if last {
+            cur.Put(s.Key, v)
+            continue
+        }
+        var k = cur.Find(s.Key)
+        if k < 0 {
+            var next = NewObject()
+            if p.Steps[i + 1].IsIndex {
+                next = new Node{Kind: Kind.Array}
+            }
+            cur.Put(s.Key, next)
+            cur = next
+        } else {
+            cur = cur.Vals[k]
+        }
+    }
+    return root
+}
